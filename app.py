@@ -19,8 +19,18 @@
 # TODO: CSV export: download your transactions for a spreadsheet.
 # TODO: Student-specific touches: default categories like tuition (propinas), transport pass, cantina, books.
 
+import sqlite3
 from flask import Flask
 
+app = Flask(__name__)
+
+def get_db():
+    conn = sqlite3.connect("budget.db")
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def register(user, email, password):
-    
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+        (user, email, password))
