@@ -1,5 +1,5 @@
 # ===== Core (the minimum for a solid project) =====
-# TODO: Accounts: register, log in, log out, delete account.
+# TODO: Accounts: REGISTER, log in, log out, delete account.
 # TODO: Transactions: add income or expenses, edit, delete, list them.
 # TODO: Filtering: by month, date range, category, or income vs. expense.
 # TODO: Categories: list the defaults (food, rent, transport, salary, allowance…).
@@ -21,6 +21,7 @@
 
 import sqlite3
 from flask import Flask
+from werkzeug.security import generate_password_hash
 
 app = Flask(__name__)
 
@@ -29,8 +30,21 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-def register(user, email, password):
+def register(username, email, password):
+    username = username.strip()
+    email = email.strip().lower()
+    if not username or "@" not in email:
+        raise ValueError("A username and a valid email are required.")
+    if len(password) < 8:
+        raise ValueError("Password must be at least 8 characters.")
     conn = get_db()
-    conn.execute(
-        "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
-        (user, email, password))
+    try:
+        with conn:
+            cursor = conn.execute(
+                "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+                (username, email, generate_password_hash(password)),)
+        return cursor.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+    finally:
+        conn.close()
