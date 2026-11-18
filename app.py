@@ -1,5 +1,5 @@
 # ===== Core (the minimum for a solid project) =====
-# TODO: Accounts: REGISTER, log in, log out, delete account.
+# TODO: Accounts: REGISTER, LOG IN, log out, delete account.
 # TODO: Transactions: add income or expenses, edit, delete, list them.
 # TODO: Filtering: by month, date range, category, or income vs. expense.
 # TODO: Categories: list the defaults (food, rent, transport, salary, allowance…).
@@ -21,7 +21,7 @@
 
 import sqlite3
 from flask import Flask
-from werkzeug.security import generate_password_hash
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 
@@ -48,3 +48,23 @@ def register(username, email, password):
         return None
     finally:
         conn.close()
+
+def login(username, email, password):
+    username = username.strip()
+    email = email.strip().lower()
+    conn = get_db()
+    try:
+        user = conn.execute(
+            "SELECT id, username, email, password_hash FROM users "
+            "WHERE username = ? AND email = ?",
+            (username, email),
+        ).fetchone()
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return None
+    finally:
+        conn.close()
+
+    if user is None or not check_password_hash(user["password_hash"], password):
+        return None
+    return {"id": user["id"], "username": user["username"], "email": user["email"]}
