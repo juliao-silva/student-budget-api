@@ -1,5 +1,5 @@
 # ===== Core (the minimum for a solid project) =====
-# TODO: Accounts: REGISTER, LOG IN, log out, delete account.
+# TODO: Accounts: REGISTER, LOG IN, LOG OUT, delete account.
 # TODO: Transactions: add income or expenses, edit, delete, list them.
 # TODO: Filtering: by month, date range, category, or income vs. expense.
 # TODO: Categories: list the defaults (food, rent, transport, salary, allowance…).
@@ -19,17 +19,50 @@
 # TODO: CSV export: download your transactions for a spreadsheet.
 # TODO: Student-specific touches: default categories like tuition (propinas), transport pass, cantina, books.
 
+import os
+import secrets
 import sqlite3
+from functools import wraps
 from flask import Flask, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "change-me"
+# Set SECRET_KEY in the environment for stable sessions. Without it, a random key is
+# used and everyone is logged out whenever the server restarts.
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.environ.get("BUDGET_DB", os.path.join(BASE_DIR, "budget.db"))
+SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
 
 def get_db():
-    conn = sqlite3.connect("budget.db")
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")  # needed for ON DELETE CASCADE
     return conn
+
+def init_db():
+    """Create the tables from schema.sql if the database is empty."""
+    conn = get_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'"
+        ).fetchone()
+        if not exists:
+            with open(SCHEMA_PATH) as f:
+                conn.executescript(f.read())
+    finally:
+        conn.close()
+
+init_db()
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify(error="Login required"), 401
+        return view(*args, **kwargs)
+    return wrapped
 
 def register(username, email, password):
     username = username.strip()
@@ -69,6 +102,43 @@ def login(username, email, password):
         return None
     return {"id": user["id"], "username": user["username"], "email": user["email"]}
 
+def delete_account(user_id, password):
+    """Delete the user after re-checking the password.
+
+    Returns True if deleted, False if the user doesn't exist or the password is wrong.
+    Related rows (transactions, budgets...) should be removed by ON DELETE CASCADE.
+    """
+    conn = get_db()
+    try:
+        user = conn.execute(
+            "SELECT password_hash FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if user is None or not check_password_hash(user["password_hash"], password):
+            return False
+        with conn:  # single transaction
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        return True
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return False
+    finally:
+        conn.close()
+
+@app.post("/register")
+def register_route():
+    data = request.get_json(silent=True) or {}
+    try:
+        user_id = register(
+            data.get("username", ""),
+            data.get("email", ""),
+            data.get("password", ""),
+        )
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    if user_id is None:
+        return jsonify(error="Username or email already in use"), 409
+    return jsonify(id=user_id), 201
+
 @app.post("/login")
 def login_route():
     data = request.get_json(silent=True) or {}
@@ -87,3 +157,12 @@ def login_route():
 def logout_route():
     session.clear()
     return jsonify(message="Logged out")
+
+@app.delete("/account")
+@login_required
+def delete_account_route():
+    data = request.get_json(silent=True) or {}
+    if not delete_account(session["user_id"], data.get("password", "")):
+        return jsonify(error="Wrong password"), 403
+    session.clear()
+    return jsonify(message="Account deleted")
