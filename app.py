@@ -20,10 +20,11 @@
 # TODO: Student-specific touches: default categories like tuition (propinas), transport pass, cantina, books.
 
 import sqlite3
-from flask import Flask
+from flask import Flask, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+app.secret_key = "change-me"
 
 def get_db():
     conn = sqlite3.connect("budget.db")
@@ -64,7 +65,25 @@ def login(username, email, password):
         return None
     finally:
         conn.close()
-
     if user is None or not check_password_hash(user["password_hash"], password):
         return None
     return {"id": user["id"], "username": user["username"], "email": user["email"]}
+
+@app.post("/login")
+def login_route():
+    data = request.get_json(silent=True) or {}
+    user = login(
+        data.get("username", ""),
+        data.get("email", ""),
+        data.get("password", ""),
+    )
+    if user is None:
+        return jsonify(error="Invalid credentials"), 401
+    session.clear()
+    session["user_id"] = user["id"]
+    return jsonify(user)
+
+@app.post("/logout")
+def logout_route():
+    session.clear()
+    return jsonify(message="Logged out")
