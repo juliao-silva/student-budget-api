@@ -1,6 +1,6 @@
 # ===== Core (the minimum for a solid project) =====
-# TODO: Accounts: REGISTER, LOG IN, LOG OUT, delete account.
-# TODO: Transactions: add income or expenses, edit, delete, list them.
+# DONE: Accounts
+# DONE: Transactions
 # TODO: Filtering: by month, date range, category, or income vs. expense.
 # TODO: Categories: list the defaults (food, rent, transport, salary, allowance…).
 # TODO: Budgets: set a monthly limit per category, edit, delete.
@@ -22,6 +22,8 @@
 import os
 import secrets
 import sqlite3
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from flask import Flask, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -34,6 +36,22 @@ app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("BUDGET_DB", os.path.join(BASE_DIR, "budget.db"))
 SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
+
+# A transaction is income or an expense depending on its category's type.
+DEFAULT_CATEGORIES = [
+    ("salary", "income"),
+    ("allowance", "income"),
+    ("scholarship", "income"),
+    ("food", "expense"),
+    ("rent", "expense"),
+    ("transport", "expense"),
+    ("tuition", "expense"),
+    ("books", "expense"),
+    ("bills", "expense"),
+    ("health", "expense"),
+    ("entertainment", "expense"),
+    ("other", "expense"),
+]
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -51,6 +69,11 @@ def init_db():
         if not exists:
             with open(SCHEMA_PATH) as f:
                 conn.executescript(f.read())
+        with conn:  # add any missing default categories (safe to run every start)
+            conn.executemany(
+                "INSERT OR IGNORE INTO categories (name, type) VALUES (?, ?)",
+                DEFAULT_CATEGORIES,
+            )
     finally:
         conn.close()
 
@@ -166,3 +189,175 @@ def delete_account_route():
         return jsonify(error="Wrong password"), 403
     session.clear()
     return jsonify(message="Account deleted")
+
+# ===== Transactions =====
+# Amounts are sent and returned in euros (e.g. 12.5) and stored as integer cents.
+# Dates are "YYYY-MM-DD"; if no date is given, today is used.
+
+TRANSACTION_SELECT = """
+    SELECT t.id, t.amount, t.transaction_date, t.description,
+           t.category_id, c.name AS category, c.type
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+"""
+
+def parse_amount(value):
+    """Convert euros (number or string) to integer cents."""
+    if value is None or isinstance(value, bool):
+        raise ValueError("amount is required.")
+    try:
+        euros = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError("amount must be a number.")
+    if not euros.is_finite() or euros <= 0:
+        raise ValueError("amount must be greater than 0.")
+    if euros.as_tuple().exponent < -2:
+        raise ValueError("amount can have at most 2 decimal places.")
+    return int(euros * 100)
+
+def parse_date(value):
+    if not isinstance(value, str):
+        raise ValueError("date must be a string like 2026-11-18.")
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        raise ValueError("date must look like 2026-11-18.")
+
+def validate_transaction(conn, data, partial):
+    """Return the columns to save. With partial=True, only the fields sent are checked."""
+    fields = {}
+    if "amount" in data or not partial:
+        fields["amount"] = parse_amount(data.get("amount"))
+    if "category_id" in data or not partial:
+        category_id = data.get("category_id")
+        if not isinstance(category_id, int) or isinstance(category_id, bool):
+            raise ValueError("category_id must be an integer.")
+        if not conn.execute("SELECT 1 FROM categories WHERE id = ?", (category_id,)).fetchone():
+            raise ValueError("Unknown category_id.")
+        fields["category_id"] = category_id
+    if "date" in data:
+        fields["transaction_date"] = parse_date(data["date"])
+    elif not partial:
+        fields["transaction_date"] = date.today().isoformat()
+    if "description" in data:
+        description = data["description"]
+        if description is not None and not isinstance(description, str):
+            raise ValueError("description must be text.")
+        fields["description"] = (description.strip() or None) if description else None
+    return fields
+
+def transaction_to_dict(row):
+    return {
+        "id": row["id"],
+        "amount": row["amount"] / 100,
+        "type": row["type"],
+        "category_id": row["category_id"],
+        "category": row["category"],
+        "date": row["transaction_date"],
+        "description": row["description"],
+    }
+
+def get_transaction(conn, user_id, transaction_id):
+    return conn.execute(
+        TRANSACTION_SELECT + " WHERE t.id = ? AND t.user_id = ?",
+        (transaction_id, user_id),
+    ).fetchone()
+
+def get_json_object():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else None
+
+@app.post("/transactions")
+@login_required
+def add_transaction():
+    data = get_json_object()
+    if data is None:
+        return jsonify(error="Expected a JSON object."), 400
+    user_id = session["user_id"]
+    conn = get_db()
+    try:
+        try:
+            fields = validate_transaction(conn, data, partial=False)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        with conn:
+            cursor = conn.execute(
+                "INSERT INTO transactions (user_id, category_id, amount, transaction_date, description) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, fields["category_id"], fields["amount"],
+                 fields["transaction_date"], fields.get("description")),
+            )
+        row = get_transaction(conn, user_id, cursor.lastrowid)
+        return jsonify(transaction_to_dict(row)), 201
+    finally:
+        conn.close()
+
+@app.get("/transactions")
+@login_required
+def list_transactions():
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            TRANSACTION_SELECT + " WHERE t.user_id = ? ORDER BY t.transaction_date DESC, t.id DESC",
+            (session["user_id"],),
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify([transaction_to_dict(row) for row in rows])
+
+@app.get("/transactions/<int:transaction_id>")
+@login_required
+def show_transaction(transaction_id):
+    conn = get_db()
+    try:
+        row = get_transaction(conn, session["user_id"], transaction_id)
+    finally:
+        conn.close()
+    if row is None:
+        return jsonify(error="Transaction not found."), 404
+    return jsonify(transaction_to_dict(row))
+
+@app.patch("/transactions/<int:transaction_id>")
+@login_required
+def edit_transaction(transaction_id):
+    data = get_json_object()
+    if data is None:
+        return jsonify(error="Expected a JSON object."), 400
+    user_id = session["user_id"]
+    conn = get_db()
+    try:
+        if get_transaction(conn, user_id, transaction_id) is None:
+            return jsonify(error="Transaction not found."), 404
+        try:
+            fields = validate_transaction(conn, data, partial=True)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if not fields:
+            return jsonify(error="Nothing to update. Send amount, category_id, date or description."), 400
+        # Column names come from validate_transaction, never from the request.
+        set_clause = ", ".join(f"{column} = ?" for column in fields)
+        with conn:
+            conn.execute(
+                f"UPDATE transactions SET {set_clause} WHERE id = ? AND user_id = ?",
+                (*fields.values(), transaction_id, user_id),
+            )
+        row = get_transaction(conn, user_id, transaction_id)
+        return jsonify(transaction_to_dict(row))
+    finally:
+        conn.close()
+
+@app.delete("/transactions/<int:transaction_id>")
+@login_required
+def delete_transaction(transaction_id):
+    conn = get_db()
+    try:
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM transactions WHERE id = ? AND user_id = ?",
+                (transaction_id, session["user_id"]),
+            )
+    finally:
+        conn.close()
+    if cursor.rowcount == 0:
+        return jsonify(error="Transaction not found."), 404
+    return jsonify(message="Transaction deleted")
