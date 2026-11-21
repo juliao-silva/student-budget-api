@@ -1,7 +1,7 @@
 # ===== Core (the minimum for a solid project) =====
 # DONE: Accounts
 # DONE: Transactions
-# TODO: Filtering: by month, date range, category, or income vs. expense.
+# DONE: Filtering
 # TODO: Categories: list the defaults (food, rent, transport, salary, allowance…).
 # TODO: Budgets: set a monthly limit per category, edit, delete.
 
@@ -190,10 +190,6 @@ def delete_account_route():
     session.clear()
     return jsonify(message="Account deleted")
 
-# ===== Transactions =====
-# Amounts are sent and returned in euros (e.g. 12.5) and stored as integer cents.
-# Dates are "YYYY-MM-DD"; if no date is given, today is used.
-
 TRANSACTION_SELECT = """
     SELECT t.id, t.amount, t.transaction_date, t.description,
            t.category_id, c.name AS category, c.type
@@ -292,14 +288,64 @@ def add_transaction():
     finally:
         conn.close()
 
+def parse_month(value):
+    """Turn "2026-11" into the first day of that month and of the next one."""
+    try:
+        year, month = (int(part) for part in value.split("-"))
+        start = date(year, month, 1)
+    except ValueError:
+        raise ValueError("month must look like 2026-11.")
+    end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    return start.isoformat(), end.isoformat()
+
+def transaction_filters(args):
+    """Build extra WHERE conditions from the query string.
+
+    Supported: ?month=YYYY-MM, ?from=YYYY-MM-DD, ?to=YYYY-MM-DD (both inclusive),
+    ?category_id=N and ?type=income|expense. They can be combined.
+    """
+    conditions, params = [], []
+    if "month" in args:
+        if "from" in args or "to" in args:
+            raise ValueError("Use either month or from/to, not both.")
+        start, end = parse_month(args["month"])
+        conditions.append("t.transaction_date >= ? AND t.transaction_date < ?")
+        params += [start, end]
+    if "from" in args:
+        conditions.append("t.transaction_date >= ?")
+        params.append(parse_date(args["from"]))
+    if "to" in args:
+        conditions.append("t.transaction_date <= ?")
+        params.append(parse_date(args["to"]))
+    if "from" in args and "to" in args and params[-2] > params[-1]:
+        raise ValueError("from must be on or before to.")
+    if "category_id" in args:
+        try:
+            category_id = int(args["category_id"])
+        except ValueError:
+            raise ValueError("category_id must be an integer.")
+        conditions.append("t.category_id = ?")
+        params.append(category_id)
+    if "type" in args:
+        if args["type"] not in ("income", "expense"):
+            raise ValueError("type must be income or expense.")
+        conditions.append("c.type = ?")
+        params.append(args["type"])
+    return conditions, params
+
 @app.get("/transactions")
 @login_required
 def list_transactions():
+    try:
+        conditions, params = transaction_filters(request.args)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    where = " AND ".join(["t.user_id = ?"] + conditions)
     conn = get_db()
     try:
         rows = conn.execute(
-            TRANSACTION_SELECT + " WHERE t.user_id = ? ORDER BY t.transaction_date DESC, t.id DESC",
-            (session["user_id"],),
+            TRANSACTION_SELECT + f" WHERE {where} ORDER BY t.transaction_date DESC, t.id DESC",
+            (session["user_id"], *params),
         ).fetchall()
     finally:
         conn.close()
@@ -334,7 +380,6 @@ def edit_transaction(transaction_id):
             return jsonify(error=str(e)), 400
         if not fields:
             return jsonify(error="Nothing to update. Send amount, category_id, date or description."), 400
-        # Column names come from validate_transaction, never from the request.
         set_clause = ", ".join(f"{column} = ?" for column in fields)
         with conn:
             conn.execute(
