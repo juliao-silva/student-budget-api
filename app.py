@@ -2,8 +2,8 @@
 # DONE: Accounts
 # DONE: Transactions
 # DONE: Filtering
-# TODO: Categories: list the defaults (food, rent, transport, salary, allowance…).
-# TODO: Budgets: set a monthly limit per category, edit, delete.
+# DONE: Categories
+# DONE: Budgets
 
 # ===== Insights (what makes it "fintech") =====
 # TODO: Monthly summary: total income, total expenses, and what's left.
@@ -22,22 +22,19 @@
 import os
 import secrets
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from flask import Flask, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-# Set SECRET_KEY in the environment for stable sessions. Without it, a random key is
-# used and everyone is logged out whenever the server restarts.
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("BUDGET_DB", os.path.join(BASE_DIR, "budget.db"))
 SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
 
-# A transaction is income or an expense depending on its category's type.
 DEFAULT_CATEGORIES = [
     ("salary", "income"),
     ("allowance", "income"),
@@ -56,11 +53,10 @@ DEFAULT_CATEGORIES = [
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")  # needed for ON DELETE CASCADE
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def init_db():
-    """Create the tables from schema.sql if the database is empty."""
     conn = get_db()
     try:
         exists = conn.execute(
@@ -69,7 +65,7 @@ def init_db():
         if not exists:
             with open(SCHEMA_PATH) as f:
                 conn.executescript(f.read())
-        with conn:  # add any missing default categories (safe to run every start)
+        with conn:
             conn.executemany(
                 "INSERT OR IGNORE INTO categories (name, type) VALUES (?, ?)",
                 DEFAULT_CATEGORIES,
@@ -126,11 +122,6 @@ def login(username, email, password):
     return {"id": user["id"], "username": user["username"], "email": user["email"]}
 
 def delete_account(user_id, password):
-    """Delete the user after re-checking the password.
-
-    Returns True if deleted, False if the user doesn't exist or the password is wrong.
-    Related rows (transactions, budgets...) should be removed by ON DELETE CASCADE.
-    """
     conn = get_db()
     try:
         user = conn.execute(
@@ -138,7 +129,7 @@ def delete_account(user_id, password):
         ).fetchone()
         if user is None or not check_password_hash(user["password_hash"], password):
             return False
-        with conn:  # single transaction
+        with conn:
             conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
         return True
     except sqlite3.Error as e:
@@ -190,6 +181,24 @@ def delete_account_route():
     session.clear()
     return jsonify(message="Account deleted")
 
+@app.get("/categories")
+@login_required
+def list_categories():
+    category_type = request.args.get("type")
+    if category_type is not None and category_type not in ("income", "expense"):
+        return jsonify(error="type must be income or expense."), 400
+    query = "SELECT id, name, type FROM categories"
+    params = ()
+    if category_type:
+        query += " WHERE type = ?"
+        params = (category_type,)
+    conn = get_db()
+    try:
+        rows = conn.execute(query + " ORDER BY type DESC, name", params).fetchall()
+    finally:
+        conn.close()
+    return jsonify([dict(row) for row in rows])
+
 TRANSACTION_SELECT = """
     SELECT t.id, t.amount, t.transaction_date, t.description,
            t.category_id, c.name AS category, c.type
@@ -198,7 +207,6 @@ TRANSACTION_SELECT = """
 """
 
 def parse_amount(value):
-    """Convert euros (number or string) to integer cents."""
     if value is None or isinstance(value, bool):
         raise ValueError("amount is required.")
     try:
@@ -220,7 +228,6 @@ def parse_date(value):
         raise ValueError("date must look like 2026-11-18.")
 
 def validate_transaction(conn, data, partial):
-    """Return the columns to save. With partial=True, only the fields sent are checked."""
     fields = {}
     if "amount" in data or not partial:
         fields["amount"] = parse_amount(data.get("amount"))
@@ -289,7 +296,6 @@ def add_transaction():
         conn.close()
 
 def parse_month(value):
-    """Turn "2026-11" into the first day of that month and of the next one."""
     try:
         year, month = (int(part) for part in value.split("-"))
         start = date(year, month, 1)
@@ -299,11 +305,6 @@ def parse_month(value):
     return start.isoformat(), end.isoformat()
 
 def transaction_filters(args):
-    """Build extra WHERE conditions from the query string.
-
-    Supported: ?month=YYYY-MM, ?from=YYYY-MM-DD, ?to=YYYY-MM-DD (both inclusive),
-    ?category_id=N and ?type=income|expense. They can be combined.
-    """
     conditions, params = [], []
     if "month" in args:
         if "from" in args or "to" in args:
@@ -406,3 +407,179 @@ def delete_transaction(transaction_id):
     if cursor.rowcount == 0:
         return jsonify(error="Transaction not found."), 404
     return jsonify(message="Transaction deleted")
+
+BUDGET_SELECT = """
+    SELECT b.id, b.category_id, c.name AS category, b.amount, b.start_date, b.end_date
+    FROM budgets b
+    JOIN categories c ON c.id = b.category_id
+"""
+
+class BudgetConflict(Exception):
+    pass
+
+def budget_to_dict(row):
+    return {
+        "id": row["id"],
+        "category_id": row["category_id"],
+        "category": row["category"],
+        "amount": row["amount"] / 100,
+        "start_date": row["start_date"],
+        "end_date": row["end_date"],
+    }
+
+def get_budget(conn, user_id, budget_id):
+    return conn.execute(
+        BUDGET_SELECT + " WHERE b.id = ? AND b.user_id = ?",
+        (budget_id, user_id),
+    ).fetchone()
+
+def validate_budget(conn, user_id, data, current=None):
+    fields = {}
+    if "amount" in data or current is None:
+        fields["amount"] = parse_amount(data.get("amount"))
+    if "category_id" in data or current is None:
+        category_id = data.get("category_id")
+        if not isinstance(category_id, int) or isinstance(category_id, bool):
+            raise ValueError("category_id must be an integer.")
+        category = conn.execute(
+            "SELECT type FROM categories WHERE id = ?", (category_id,)
+        ).fetchone()
+        if category is None:
+            raise ValueError("Unknown category_id.")
+        if category["type"] != "expense":
+            raise ValueError("Budgets can only be set on expense categories.")
+        fields["category_id"] = category_id
+    if "month" in data:
+        if "start_date" in data or "end_date" in data:
+            raise ValueError("Use either month or start_date/end_date, not both.")
+        if not isinstance(data["month"], str):
+            raise ValueError("month must look like 2026-11.")
+        start, next_month = parse_month(data["month"])
+        fields["start_date"] = start
+        fields["end_date"] = (date.fromisoformat(next_month) - timedelta(days=1)).isoformat()
+    else:
+        for key in ("start_date", "end_date"):
+            if key in data:
+                fields[key] = parse_date(data[key])
+            elif current is None:
+                raise ValueError("Send month, or both start_date and end_date.")
+    merged = {**(dict(current) if current else {}), **fields}
+    if merged["end_date"] <= merged["start_date"]:
+        raise ValueError("end_date must be after start_date.")
+    overlap = conn.execute(
+        "SELECT 1 FROM budgets WHERE user_id = ? AND category_id = ? AND id != ? "
+        "AND start_date <= ? AND end_date >= ?",
+        (user_id, merged["category_id"], current["id"] if current else 0,
+         merged["end_date"], merged["start_date"]),
+    ).fetchone()
+    if overlap:
+        raise BudgetConflict("You already have a budget for this category in that period.")
+    return fields
+
+@app.post("/budgets")
+@login_required
+def add_budget():
+    data = get_json_object()
+    if data is None:
+        return jsonify(error="Expected a JSON object."), 400
+    user_id = session["user_id"]
+    conn = get_db()
+    try:
+        try:
+            fields = validate_budget(conn, user_id, data)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        except BudgetConflict as e:
+            return jsonify(error=str(e)), 409
+        with conn:
+            cursor = conn.execute(
+                "INSERT INTO budgets (user_id, category_id, amount, start_date, end_date) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, fields["category_id"], fields["amount"],
+                 fields["start_date"], fields["end_date"]),
+            )
+        row = get_budget(conn, user_id, cursor.lastrowid)
+        return jsonify(budget_to_dict(row)), 201
+    finally:
+        conn.close()
+
+@app.get("/budgets")
+@login_required
+def list_budgets():
+    conditions, params = ["b.user_id = ?"], [session["user_id"]]
+    if "month" in request.args:
+        try:
+            start, next_month = parse_month(request.args["month"])
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        conditions.append("b.start_date < ? AND b.end_date >= ?")
+        params += [next_month, start]
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            BUDGET_SELECT + " WHERE " + " AND ".join(conditions)
+            + " ORDER BY b.start_date DESC, c.name",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify([budget_to_dict(row) for row in rows])
+
+@app.get("/budgets/<int:budget_id>")
+@login_required
+def show_budget(budget_id):
+    conn = get_db()
+    try:
+        row = get_budget(conn, session["user_id"], budget_id)
+    finally:
+        conn.close()
+    if row is None:
+        return jsonify(error="Budget not found."), 404
+    return jsonify(budget_to_dict(row))
+
+@app.patch("/budgets/<int:budget_id>")
+@login_required
+def edit_budget(budget_id):
+    data = get_json_object()
+    if data is None:
+        return jsonify(error="Expected a JSON object."), 400
+    user_id = session["user_id"]
+    conn = get_db()
+    try:
+        current = get_budget(conn, user_id, budget_id)
+        if current is None:
+            return jsonify(error="Budget not found."), 404
+        try:
+            fields = validate_budget(conn, user_id, data, current)
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        except BudgetConflict as e:
+            return jsonify(error=str(e)), 409
+        if not fields:
+            return jsonify(error="Nothing to update. Send amount, category_id, month, start_date or end_date."), 400
+        set_clause = ", ".join(f"{column} = ?" for column in fields)
+        with conn:
+            conn.execute(
+                f"UPDATE budgets SET {set_clause} WHERE id = ? AND user_id = ?",
+                (*fields.values(), budget_id, user_id),
+            )
+        row = get_budget(conn, user_id, budget_id)
+        return jsonify(budget_to_dict(row))
+    finally:
+        conn.close()
+
+@app.delete("/budgets/<int:budget_id>")
+@login_required
+def delete_budget(budget_id):
+    conn = get_db()
+    try:
+        with conn:
+            cursor = conn.execute(
+                "DELETE FROM budgets WHERE id = ? AND user_id = ?",
+                (budget_id, session["user_id"]),
+            )
+    finally:
+        conn.close()
+    if cursor.rowcount == 0:
+        return jsonify(error="Budget not found."), 404
+    return jsonify(message="Budget deleted")
