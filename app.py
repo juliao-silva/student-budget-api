@@ -141,15 +141,22 @@ def delete_account(user_id, password):
     finally:
         conn.close()
 
+def text_fields(*names):
+    data = get_json_object()
+    if data is None:
+        raise ValueError("Expected a JSON object.")
+    values = []
+    for name in names:
+        value = data.get(name, "")
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be text.")
+        values.append(value)
+    return values
+
 @app.post("/register")
 def register_route():
-    data = request.get_json(silent=True) or {}
     try:
-        user_id = register(
-            data.get("username", ""),
-            data.get("email", ""),
-            data.get("password", ""),
-        )
+        user_id = register(*text_fields("username", "email", "password"))
     except ValueError as e:
         return jsonify(error=str(e)), 400
     if user_id is None:
@@ -158,12 +165,10 @@ def register_route():
 
 @app.post("/login")
 def login_route():
-    data = request.get_json(silent=True) or {}
-    user = login(
-        data.get("username", ""),
-        data.get("email", ""),
-        data.get("password", ""),
-    )
+    try:
+        user = login(*text_fields("username", "email", "password"))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
     if user is None:
         return jsonify(error="Invalid credentials"), 401
     session.clear()
@@ -178,8 +183,11 @@ def logout_route():
 @app.delete("/account")
 @login_required
 def delete_account_route():
-    data = request.get_json(silent=True) or {}
-    if not delete_account(session["user_id"], data.get("password", "")):
+    try:
+        (password,) = text_fields("password")
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    if not delete_account(session["user_id"], password):
         return jsonify(error="Wrong password"), 403
     session.clear()
     return jsonify(message="Account deleted")
