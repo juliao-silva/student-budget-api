@@ -15,7 +15,7 @@
 # ===== Standout extras (pick one or two) =====
 # TODO: Recurring transactions: rent, phone, subscriptions added automatically each month.
 # TODO: Savings goals: "€300 for a trip by June," with progress tracking.
-# TODO: Alerts: flag when a category hits 80% of its budget.
+# DONE: Alerts
 # DONE: CSV export
 # TODO: Student-specific touches: default categories like tuition (propinas), transport pass, cantina, books.
 
@@ -29,7 +29,7 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from flask import Flask, Response, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
-from budget import monthly_summary, spending_by_category, budget_status, daily_allowance, compare_months
+from budget import monthly_summary, spending_by_category, budget_status, daily_allowance, compare_months, budget_alerts
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
@@ -720,3 +720,24 @@ def compare_route():
         item["current"] /= 100
         item["previous"] /= 100
     return jsonify(month=start[:7], previous_month=previous_start[:7], **comparison)
+
+@app.get("/alerts")
+@login_required
+def alerts_route():
+    try:
+        start, end = requested_month()
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    threshold = request.args.get("threshold", "80")
+    if not (threshold.isascii() and threshold.isdigit()) or not 1 <= int(threshold) <= 100:
+        return jsonify(error="threshold must be a whole number from 1 to 100."), 400
+    threshold = int(threshold)
+    conn = get_db()
+    try:
+        alerts = budget_alerts(conn, session["user_id"], start, end, threshold)
+    finally:
+        conn.close()
+    for alert in alerts:
+        for key in ("amount", "spent", "remaining"):
+            alert[key] /= 100
+    return jsonify(month=start[:7], threshold=threshold, alerts=alerts)

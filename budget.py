@@ -121,3 +121,12 @@ def compare_months(conn, user_id, previous_start, start, end):
         for key in ("income", "expenses")
     }
     return {**totals, "categories": categories}
+
+def budget_alerts(conn, user_id, start, end, threshold):
+    alerts = []
+    for budget in budget_status(conn, user_id, start, end):
+        if budget["percent_used"] >= threshold:
+            budget["level"] = "over" if budget["over"] else "warning"
+            alerts.append(budget)
+    alerts.sort(key=lambda b: -b["percent_used"])
+    return alerts
