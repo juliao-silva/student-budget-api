@@ -6,7 +6,7 @@
 # DONE: Budgets
 
 # ===== Insights (what makes it "fintech") =====
-# TODO: Monthly summary: total income, total expenses, and what's left.
+# DONE: Monthly summary
 # TODO: Spending by category: where the money went this month, as totals and percentages.
 # TODO: Budget status: for each budget, how much is spent, how much remains, and whether you're over.
 # TODO: Month vs. month: "you spent 20% more on food than last month."
@@ -27,6 +27,7 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from flask import Flask, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
+from budget import monthly_summary
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
@@ -583,3 +584,23 @@ def delete_budget(budget_id):
     if cursor.rowcount == 0:
         return jsonify(error="Budget not found."), 404
     return jsonify(message="Budget deleted")
+
+@app.get("/summary")
+@login_required
+def summary_route():
+    try:
+        start, end = parse_month(request.args.get("month", date.today().strftime("%Y-%m")))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    conn = get_db()
+    try:
+        summary = monthly_summary(conn, session["user_id"], start, end)
+    finally:
+        conn.close()
+    return jsonify(
+        month=start[:7],
+        income=summary["income"] / 100,
+        expenses=summary["expenses"] / 100,
+        left=summary["left"] / 100,
+        transactions=summary["transactions"],
+    )
