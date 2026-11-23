@@ -7,8 +7,8 @@
 
 # ===== Insights (what makes it "fintech") =====
 # DONE: Monthly summary
-# TODO: Spending by category: where the money went this month, as totals and percentages.
-# TODO: Budget status: for each budget, how much is spent, how much remains, and whether you're over.
+# DONE: Spending by category
+# DONE: Budget status
 # TODO: Month vs. month: "you spent 20% more on food than last month."
 # TODO: Daily allowance: "you have €140 left and 10 days to go, so about €14/day."
 
@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from flask import Flask, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
-from budget import monthly_summary
+from budget import monthly_summary, spending_by_category, budget_status
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
@@ -585,11 +585,14 @@ def delete_budget(budget_id):
         return jsonify(error="Budget not found."), 404
     return jsonify(message="Budget deleted")
 
+def requested_month():
+    return parse_month(request.args.get("month", date.today().strftime("%Y-%m")))
+
 @app.get("/summary")
 @login_required
 def summary_route():
     try:
-        start, end = parse_month(request.args.get("month", date.today().strftime("%Y-%m")))
+        start, end = requested_month()
     except ValueError as e:
         return jsonify(error=str(e)), 400
     conn = get_db()
@@ -604,3 +607,36 @@ def summary_route():
         left=summary["left"] / 100,
         transactions=summary["transactions"],
     )
+
+@app.get("/spending")
+@login_required
+def spending_route():
+    try:
+        start, end = requested_month()
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    conn = get_db()
+    try:
+        spending = spending_by_category(conn, session["user_id"], start, end)
+    finally:
+        conn.close()
+    for category in spending["categories"]:
+        category["total"] /= 100
+    return jsonify(month=start[:7], total=spending["total"] / 100, categories=spending["categories"])
+
+@app.get("/budgets/status")
+@login_required
+def budget_status_route():
+    try:
+        start, end = requested_month()
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    conn = get_db()
+    try:
+        budgets = budget_status(conn, session["user_id"], start, end)
+    finally:
+        conn.close()
+    for budget in budgets:
+        for key in ("amount", "spent", "remaining"):
+            budget[key] /= 100
+    return jsonify(month=start[:7], budgets=budgets)
