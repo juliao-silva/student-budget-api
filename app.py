@@ -16,16 +16,18 @@
 # TODO: Recurring transactions: rent, phone, subscriptions added automatically each month.
 # TODO: Savings goals: "€300 for a trip by June," with progress tracking.
 # TODO: Alerts: flag when a category hits 80% of its budget.
-# TODO: CSV export: download your transactions for a spreadsheet.
+# DONE: CSV export
 # TODO: Student-specific touches: default categories like tuition (propinas), transport pass, cantina, books.
 
+import csv
+import io
 import os
 import secrets
 import sqlite3
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
-from flask import Flask, session, request, jsonify
+from flask import Flask, Response, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from budget import monthly_summary, spending_by_category, budget_status, daily_allowance, compare_months
 
@@ -335,23 +337,56 @@ def transaction_filters(args):
         params.append(args["type"])
     return conditions, params
 
+def find_transactions(user_id, args):
+    conditions, params = transaction_filters(args)
+    where = " AND ".join(["t.user_id = ?"] + conditions)
+    conn = get_db()
+    try:
+        return conn.execute(
+            TRANSACTION_SELECT + f" WHERE {where} ORDER BY t.transaction_date DESC, t.id DESC",
+            (user_id, *params),
+        ).fetchall()
+    finally:
+        conn.close()
+
 @app.get("/transactions")
 @login_required
 def list_transactions():
     try:
-        conditions, params = transaction_filters(request.args)
+        rows = find_transactions(session["user_id"], request.args)
     except ValueError as e:
         return jsonify(error=str(e)), 400
-    where = " AND ".join(["t.user_id = ?"] + conditions)
-    conn = get_db()
-    try:
-        rows = conn.execute(
-            TRANSACTION_SELECT + f" WHERE {where} ORDER BY t.transaction_date DESC, t.id DESC",
-            (session["user_id"], *params),
-        ).fetchall()
-    finally:
-        conn.close()
     return jsonify([transaction_to_dict(row) for row in rows])
+
+def safe_csv_text(value):
+    if value and value[0] in "=+-@\t\r":
+        return "'" + value
+    return value
+
+@app.get("/transactions/export")
+@login_required
+def export_transactions():
+    try:
+        rows = find_transactions(session["user_id"], request.args)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["date", "type", "category", "amount", "description"])
+    for row in reversed(rows):
+        writer.writerow([
+            row["transaction_date"],
+            row["type"] or "",
+            row["category"] or "",
+            f"{row['amount'] / 100:.2f}",
+            safe_csv_text(row["description"] or ""),
+        ])
+    filename = f"transactions-{request.args.get('month', date.today().isoformat())}.csv"
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 @app.get("/transactions/<int:transaction_id>")
 @login_required
