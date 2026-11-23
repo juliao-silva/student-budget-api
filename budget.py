@@ -1,3 +1,5 @@
+from datetime import date
+
 def monthly_summary(conn, user_id, start, end):
     row = conn.execute(
         "SELECT "
@@ -66,3 +68,56 @@ def budget_status(conn, user_id, start, end):
         }
         for row in rows
     ]
+
+def daily_allowance(conn, user_id, start, end, today):
+    summary = monthly_summary(conn, user_id, start, end)
+    first_day = date.fromisoformat(start)
+    next_month = date.fromisoformat(end)
+    if today >= next_month:
+        days_left = 0
+    elif today < first_day:
+        days_left = (next_month - first_day).days
+    else:
+        days_left = (next_month - today).days
+    if days_left and summary["left"] > 0:
+        per_day = summary["left"] // days_left
+    else:
+        per_day = 0
+    return {"left": summary["left"], "days_left": days_left, "per_day": per_day}
+
+def percent_change(current, previous):
+    if previous == 0:
+        return None
+    return round((current - previous) * 100 / previous, 1)
+
+def compare_months(conn, user_id, previous_start, start, end):
+    current = monthly_summary(conn, user_id, start, end)
+    previous = monthly_summary(conn, user_id, previous_start, start)
+    current_spending = {
+        c["category_id"]: c for c in spending_by_category(conn, user_id, start, end)["categories"]
+    }
+    previous_spending = {
+        c["category_id"]: c for c in spending_by_category(conn, user_id, previous_start, start)["categories"]
+    }
+    categories = []
+    for category_id in current_spending.keys() | previous_spending.keys():
+        now = current_spending.get(category_id, {}).get("total", 0)
+        before = previous_spending.get(category_id, {}).get("total", 0)
+        name = (current_spending.get(category_id) or previous_spending[category_id])["category"]
+        categories.append({
+            "category_id": category_id,
+            "category": name,
+            "current": now,
+            "previous": before,
+            "change_percent": percent_change(now, before),
+        })
+    categories.sort(key=lambda c: (-c["current"], c["category"]))
+    totals = {
+        key: {
+            "current": current[key],
+            "previous": previous[key],
+            "change_percent": percent_change(current[key], previous[key]),
+        }
+        for key in ("income", "expenses")
+    }
+    return {**totals, "categories": categories}

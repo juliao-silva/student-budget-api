@@ -9,8 +9,8 @@
 # DONE: Monthly summary
 # DONE: Spending by category
 # DONE: Budget status
-# TODO: Month vs. month: "you spent 20% more on food than last month."
-# TODO: Daily allowance: "you have €140 left and 10 days to go, so about €14/day."
+# DONE: Month vs. month
+# DONE: Daily allowance
 
 # ===== Standout extras (pick one or two) =====
 # TODO: Recurring transactions: rent, phone, subscriptions added automatically each month.
@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from flask import Flask, session, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
-from budget import monthly_summary, spending_by_category, budget_status
+from budget import monthly_summary, spending_by_category, budget_status, daily_allowance, compare_months
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
@@ -640,3 +640,40 @@ def budget_status_route():
         for key in ("amount", "spent", "remaining"):
             budget[key] /= 100
     return jsonify(month=start[:7], budgets=budgets)
+
+@app.get("/allowance")
+@login_required
+def allowance_route():
+    try:
+        start, end = requested_month()
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    conn = get_db()
+    try:
+        allowance = daily_allowance(conn, session["user_id"], start, end, date.today())
+    finally:
+        conn.close()
+    return jsonify(
+        month=start[:7],
+        left=allowance["left"] / 100,
+        days_left=allowance["days_left"],
+        per_day=allowance["per_day"] / 100,
+    )
+
+@app.get("/compare")
+@login_required
+def compare_route():
+    try:
+        start, end = requested_month()
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    previous_start = (date.fromisoformat(start) - timedelta(days=1)).replace(day=1).isoformat()
+    conn = get_db()
+    try:
+        comparison = compare_months(conn, session["user_id"], previous_start, start, end)
+    finally:
+        conn.close()
+    for item in [comparison["income"], comparison["expenses"], *comparison["categories"]]:
+        item["current"] /= 100
+        item["previous"] /= 100
+    return jsonify(month=start[:7], previous_month=previous_start[:7], **comparison)
