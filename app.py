@@ -1,24 +1,3 @@
-# ===== Core (the minimum for a solid project) =====
-# DONE: Accounts
-# DONE: Transactions
-# DONE: Filtering
-# DONE: Categories
-# DONE: Budgets
-
-# ===== Insights (what makes it "fintech") =====
-# DONE: Monthly summary
-# DONE: Spending by category
-# DONE: Budget status
-# DONE: Month vs. month
-# DONE: Daily allowance
-
-# ===== Standout extras (pick one or two) =====
-# TODO: Recurring transactions: rent, phone, subscriptions added automatically each month.
-# TODO: Savings goals: "€300 for a trip by June," with progress tracking.
-# DONE: Alerts
-# DONE: CSV export
-# TODO: Student-specific touches: default categories like tuition (propinas), transport pass, cantina, books.
-
 import csv
 import io
 import os
