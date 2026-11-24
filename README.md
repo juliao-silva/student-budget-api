@@ -1,6 +1,6 @@
 # Student Budget API
 
-#### Video Demo: <(https://youtu.be/A_58rAmBKjw)>
+#### Video Demo: https://youtu.be/A_58rAmBKjw
 
 #### Description:
 
